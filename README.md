@@ -1,6 +1,6 @@
 # Agentic AI platform
 
-Internal LLM agent product I shipped for a small team. The codebase is private; this is the public-facing version of how it's put together and what I learned.
+Internal LLM agent product I shipped for a small team. The codebase is private; this is just notes on how it's put together and what I learned.
 
 ## What it is
 
