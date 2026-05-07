@@ -16,6 +16,8 @@ Open-source agent loops are designed to run from a CLI. Putting one inside a cha
 
 The harness emits its own event stream: tokens, tool-call starts and ends, tool outputs, errors. The frontend wants typed SSE frames. I wrote an adapter that subscribes to the harness bus and re-emits frames in the shape `assistant-ui` consumes. About a dozen event types mapped, plus reconnect handling for when the user's network blips.
 
+Streaming wasn't optional. A single agent turn can fire half a dozen tool calls, each taking seconds, so without streaming the user just stares at a frozen UI for thirty seconds while the agent thinks. The whole pipeline has to be streaming end-to-end, and the LLM endpoint behind it has to be high-throughput. Any buffering or slow link kills the UX.
+
 Sessions were the next problem. Mini-Agent thinks in one session per process. Users open a thread, close the tab, come back the next day, and expect their messages to still be there. The harness has no rehydration story, so I had to snapshot the relevant state and restore it on resume.
 
 Each tool call needed its own UI. A search renders the URL, image gen renders the prompt while it runs, a long bash command collapses into an expandable header. I built a `ToolCallUI` that dispatches to a registered renderer per tool. Without that, every new tool would have been a frontend PR.
