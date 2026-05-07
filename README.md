@@ -28,7 +28,9 @@ A "skill" is a `SKILL.md` file with reference docs and helper scripts. The agent
 
 Models copy fenced code blocks from `SKILL.md` literally. Put a `tool_call(...)` example in a triple-backtick block as documentation and the model will emit that fenced block as text in its reply instead of actually invoking the tool. Cost me half a day on a skill that "almost worked, but never actually called the tool". Fix: never use code blocks to demonstrate tool usage. Use imperative markdown sentences.
 
-Skills have to load lazily. Pre-loading every skill at session start blew up the context budget and made the model worse at deciding when to use any of them. Skills now load only when the model asks for them by name.
+Skills aren't the same thing as tools. The difference is just about the context window. Tools live in the schema the model sees on every turn, so every tool you add costs context forever. Skills sit on disk and only load when something invokes them by name. You can have thirty skills and pay nothing until one gets picked. Took me a while to figure this out — pre-loading every skill at session start blew up the context budget and made the model worse at deciding when to use any of them.
+
+A related trick: tool schemas are mutable mid-conversation. Once a skill has finished its work, you can pop the tools it used out of the schema and reclaim the context. Skills that load further skills make this compound. A long agent run can stay with just a few tools live at any one time.
 
 Silent skill failures are the worst class of bug. If a skill no-ops, the model thinks the work is done and confidently tells the user "I've created your deck." Every skill now has to raise an error string the agent has to surface.
 
@@ -61,6 +63,10 @@ A live timeline in the UI shows phase 1 done, phase 2 running, entities extracte
 ## Stack
 
 FastAPI on Python 3.11, supervisord in production. React 18 + TypeScript + Tailwind + Vite on the frontend with `assistant-ui` as the chat primitive. Forked Mini-Agent for the agent loop. Self-hosted LLMs on SageMaker for chat, embeddings, and rerankers. Postgres for memory, S3 for documents and artifacts. Docker Compose in dev, supervisord on EC2 in prod.
+
+## A note on speed
+
+The agentic flow ended up feeling faster than equivalent single-shot prompting, even though it makes a lot more LLM calls. My guess is prompt caching. The harness reuses the system prompt and the running message buffer across turns, so most of each continuation hits the cache instead of doing a fresh prefill. You pay the prefill once at the start of a thread and the rest streams for almost nothing.
 
 ## What I'd do differently
 
