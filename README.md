@@ -1,119 +1,75 @@
-# Building production agentic AI systems
+# Agentic AI platform
 
-Notes from shipping an agentic AI platform to a small internal user base — covering how I integrate vendor agent loops, author custom skills, stream tool-call output, and design RAG pipelines that compound knowledge over time.
+Internal LLM agent product I shipped for a small team. The codebase is private; this is the public-facing version of how it's put together and what I learned.
 
-I'm a software engineer working on agent systems. This page is the public companion to a private codebase — the architectural patterns and the lessons, without the parts that aren't mine to share.
+## What it is
 
----
+Two-panel chat. Conversation on the left, artifact viewer on the right (PPTX, DOCX, XLSX, code, charts). The agent can search the web, fetch URLs, ingest documents, generate artifacts that pop into the side panel, and push its own outputs back into a wiki it then reads from on later turns.
 
-## What I built
-
-A two-panel chat product where users converse with an LLM agent that can:
-
-- Generate live artifacts (PPTX, DOCX, XLSX, code) that render alongside the chat
-- Search the web, fetch URLs, ingest documents into a personal knowledge wiki
-- Stream every token and tool-call to the UI in real time
-- Save chat outputs back into the wiki, where the agent indexes them and re-reads them on later turns — knowledge compounds across sessions
-
-The agent loop itself is a fork of [MiniMax Mini-Agent](https://github.com/MiniMax-AI/MiniMax-Agent). The wrapper around it — backend streaming layer, frontend, model proxy, RAG and wiki pipeline, auth — is what I designed and shipped.
+The agent loop is a fork of [MiniMax Mini-Agent](https://github.com/MiniMax-AI/MiniMax-Agent). I wrote everything around it.
 
 ![Architecture](./architecture.png)
 
-> Source: [`architecture.excalidraw`](./architecture.excalidraw) — drop into [excalidraw.com](https://excalidraw.com) to edit.
+## Wrapping the harness
 
----
+Open-source agent loops are designed to run from a CLI. Putting one inside a chat product was most of the work, and most of it wasn't interesting.
 
-## 1 · Integrating an agent harness
+The harness emits its own event stream: tokens, tool-call starts and ends, tool outputs, errors. The frontend wants typed SSE frames. I wrote an adapter that subscribes to the harness bus and re-emits frames in the shape `assistant-ui` consumes. About a dozen event types mapped, plus reconnect handling for when the user's network blips.
 
-Vendor agent loops (Mini-Agent, OpenAI Agents SDK, Anthropic's Claude Agent SDK, etc.) ship with their own runtime — but they expect to be driven from a CLI or notebook. To make one feel native inside a chat product, I had to build:
+Sessions were the next problem. Mini-Agent thinks in one session per process. Users open a thread, close the tab, come back the next day, and expect their messages to still be there. The harness has no rehydration story, so I had to snapshot the relevant state and restore it on resume.
 
-- **Streaming bridge.** The harness emits raw token + tool-call events; the frontend needs SSE frames it can render incrementally. I wrote a streaming adapter that turns the harness event bus into a typed SSE stream the React layer consumes via `assistant-ui`.
-- **Session lifecycle.** Mini-Agent thinks in single sessions; users think in threads they leave and come back to. I built a session manager that persists each thread's state (messages, tool history, artifacts) and rehydrates on resume.
-- **Tool-call rendering.** Every tool invocation needs a UI: a search shows the queried URL, an image-gen shows the inflight prompt, a long bash command collapses into a header you can expand. I designed a generic `ToolCallUI` component that registers per-tool renderers.
-- **Artifact channel.** Long-form outputs (a 12-slide deck, a 600-line report, a generated chart) shouldn't fit in chat bubbles. The agent emits them to a separate artifact bus, which renders in a side panel with preview and download.
+Each tool call needed its own UI. A search renders the URL, image gen renders the prompt while it runs, a long bash command collapses into an expandable header. I built a `ToolCallUI` that dispatches to a registered renderer per tool. Without that, every new tool would have been a frontend PR.
 
-Takeaway: integrating a harness is 20% wiring the loop and 80% making its outputs feel native in your product surface.
+Long outputs (a 12-slide deck, a 600-line file, a chart) don't fit in a chat bubble. They go to a separate artifact bus and render in the side panel. The user keeps scrolling chat while the latest doc loads beside it.
 
----
+## Skills
 
-## 2 · Authoring agent skills
+A "skill" is a `SKILL.md` file with reference docs and helper scripts. The agent loads it on demand and chains tool calls through it. I wrote skills for deck/doc/spreadsheet generation, document parsing, image generation, and deployment automation. A few things I had to learn the hard way:
 
-A "skill" is a `SKILL.md` file plus reference docs and helper scripts, packaged as a directory the agent can load on demand. The skill tells the agent *when* to invoke it, *what tools* it exposes, and *how* to chain them.
+Models copy fenced code blocks from `SKILL.md` literally. Put a `tool_call(...)` example in a triple-backtick block as documentation and the model will emit that fenced block as text in its reply instead of actually invoking the tool. Cost me half a day on a skill that "almost worked, but never actually called the tool". Fix: never use code blocks to demonstrate tool usage. Use imperative markdown sentences.
 
-I authored skills for deck/doc/spreadsheet generation, document parsing, image generation, and deployment automation. The non-obvious lessons:
+Skills have to load lazily. Pre-loading every skill at session start blew up the context budget and made the model worse at deciding when to use any of them. Skills now load only when the model asks for them by name.
 
-- **Models copy patterns from templates regardless of how many anti-pattern rules you write.** If your `SKILL.md` shows a fenced code block with a `tool_call(...)` example, the model will reproduce that fenced code block as text in its output instead of invoking the tool. Fix: write tool invocations as imperative markdown, never as code samples.
-- **Skill loading must be lazy.** Loading every skill at session start blows up the context window and confuses the model. The harness should load a skill only when the model asks for it (or when a router matches it).
-- **Skills should fail loudly.** A skill that silently no-ops is the worst-case bug — you can't tell from the chat whether the model didn't try, the skill didn't run, or the output was dropped. Every skill I shipped raises a clear error string the agent surfaces to the user.
-- **Rules files beat narrative.** A folder of one-rule-per-file behavioural notes (`.claude/rules/*.md`) outperformed long narrative `SKILL.md` files for steering model behavior. Models scan rule files; they skim narrative.
+Silent skill failures are the worst class of bug. If a skill no-ops, the model thinks the work is done and confidently tells the user "I've created your deck." Every skill now has to raise an error string the agent has to surface.
 
----
+Rules files beat narrative. Behavioural guidance lives in `.claude/rules/*.md`, one rule per file, terse. Long narrative SKILL files don't steer the model nearly as well. Models scan rule files; they skim paragraphs.
 
-## 3 · LLM proxy: OpenAI-compatible → SageMaker
+## OpenAI → SageMaker proxy
 
-The agent harness expects an OpenAI-compatible API. The models we run live on SageMaker endpoints, which use a different request shape and auth model. I wrote a thin FastAPI proxy that:
+The harness expects OpenAI-compatible endpoints. My models live on SageMaker, which uses a different request shape and IAM-based auth. So there's a thin FastAPI proxy in front: it translates `chat/completions` and `embeddings`, handles streaming both ways, routes by model id, and normalises errors. About 200 lines. Lets every consumer pretend SageMaker doesn't exist.
 
-- Translates OpenAI `chat/completions` and `embeddings` shapes to SageMaker `invoke_endpoint` calls
-- Handles streaming (`text/event-stream` ↔ SageMaker streaming responses)
-- Routes between multiple model endpoints by model ID — a single chat client can target the primary chat model, an alternate provider, an embedding model, or a reranker
-- Normalizes errors so every consumer sees consistent response codes
+## Two-phase RAG
 
-Roughly 200 lines of code; saves us from maintaining a custom client in every consumer.
+Naive RAG ingestion is chunk-embed-store-retrieve. Fine on small documents. Upload a 200-page PDF and the user watches a spinner for three minutes before they can ask anything.
 
----
+I split it.
 
-## 4 · Two-phase RAG with compounding knowledge
+**Phase 1** is fast and blocking. Parse, chunk, embed, write to the vector store. Done in around thirty seconds for typical inputs. The user can query immediately.
 
-The naive RAG flow — chunk, embed, store, retrieve — has a latency problem when you ingest documents interactively. Upload a 200-page PDF and you wait three minutes before you can ask anything.
+**Phase 2** is slow and runs in the background. A separate agent re-reads the document, extracts entities and concepts, builds wiki pages with crosslinks and backlinks, and slots entities into a knowledge graph. Takes minutes. The user has long since gone back to chatting.
 
-The pattern I shipped splits ingestion into two phases:
+Retrieval pulls back Phase 1 chunks plus Phase 2 wiki entries that reference them. Phase 2 is also toggle-able by environment, useful for keeping inference cost down outside of production.
 
-- **Phase 1 — fast, blocking.** Parse → chunk → embed → write to vector store. The user can now query the document. Target: ≤30s for typical inputs.
-- **Phase 2 — slow, background.** A separate agent re-reads the document, extracts entities and concepts, builds wiki pages with cross-links and backlinks, classifies entities into a knowledge graph. Runs invisibly while the user keeps working.
+The bit that ended up mattering most was a "save to wiki" button on the agent's outputs. Saving runs the same two-phase pipeline on the agent's own message, so prior synthesis becomes corpus on later turns. Over a few weeks of use, the wiki turns into a third source that retrieves a lot better than the raw documents do, because the language already matches what the model produces.
 
-The result is a wiki the agent grows over time. When the user asks a question, retrieval pulls back chunks (Phase 1 product) **and** the wiki entries that reference those chunks (Phase 2 product). The split also lets us toggle Phase 2 per-environment for cost control.
+A live timeline in the UI shows phase 1 done, phase 2 running, entities extracted, wiki page written. Beats a spinner that won't tell you why it's taking so long.
 
-Two design touches I'm particularly happy with:
+## Frontend
 
-- A live ingestion timeline in the UI — Phase 1 → Phase 2 → "extracting entities" → "wiki page created" — so the user sees their doc moving through the pipeline instead of staring at a spinner.
-- A "save to wiki" action that pushes the agent's chat output back through the same two-phase pipeline. The agent's prior synthesis becomes input to its next turn, which is what makes the knowledge actually compound.
-
----
-
-## 5 · Frontend: streaming + tool-calls + artifacts
-
-The chat surface uses [`assistant-ui`](https://github.com/assistant-ui/assistant-ui) as the message-list primitive, with custom layers on top:
-
-- **Custom content parts** for tool calls, artifacts, file references, errors. Each registered with the assistant-ui content-parts API.
-- **Mermaid diagram inline rendering** with a validation step — we run candidate diagrams through a pre-render check before mounting them, so a malformed diagram surfaces an inline error instead of crashing the whole message.
-- **Resizable two-panel layout.** Chat thread on the left, artifact viewer on the right. The split lets users keep iterating in chat while reviewing the latest deck/doc/code without losing scroll position.
-- **Real-time tool-call collapsing.** Long tool calls collapse to a one-line summary by default with an expand affordance, so a chat with 20 tool calls is still scannable.
-
----
+`assistant-ui` for the message-list primitive. On top of that: custom content parts for tool calls, artifacts, file refs, and errors. Inline mermaid rendering with a pre-render validation step, because malformed diagrams used to crash the whole message instead of failing inline. Resizable two-panel layout. Long tool calls default to a one-line collapsed header so a chat with twenty calls is still scannable.
 
 ## Stack
 
-| Layer | What I used |
-|---|---|
-| Backend | FastAPI · Python 3.11 · supervisord |
-| Frontend | React 18 · TypeScript · Tailwind · Vite · assistant-ui |
-| Agent | Forked MiniMax Mini-Agent + custom skills |
-| Models | Self-hosted LLMs on SageMaker (chat, embeddings, rerankers); third-party APIs for web search and image generation |
-| Storage | PostgreSQL for memory; S3 for documents and artifacts |
-| Deployment | Docker Compose for dev; multi-process supervisord on EC2 for prod |
-
----
+FastAPI on Python 3.11, supervisord in production. React 18 + TypeScript + Tailwind + Vite on the frontend with `assistant-ui` as the chat primitive. Forked Mini-Agent for the agent loop. Self-hosted LLMs on SageMaker for chat, embeddings, and rerankers. Postgres for memory, S3 for documents and artifacts. Docker Compose in dev, supervisord on EC2 in prod.
 
 ## What I'd do differently
 
-- **Pick the harness later.** I committed to one agent loop early; some of the integration friction would have evaporated with a smaller, less opinionated runtime. If I were starting over I'd prototype the streaming + tool-call surface against a thin in-house loop first, then swap a vendor harness in once the contract is stable.
-- **Treat skills as a product surface.** Skills started as throwaway prompts and ended up being the highest-leverage thing in the system. I would version them, test them, and ship them through CI from day one.
-- **Bake observability into the skill protocol.** When a skill misbehaves the easiest debugging signal is a structured event log — entries / exits / tool calls / outputs. Adding this in retrospect was painful; designing it into the skill API would have been cheap.
+Committed to a vendor harness too early. I spent weeks forcing it into product shapes it wasn't designed for. Building the streaming and tool-call surface first against the thinnest possible in-house loop, getting the contracts stable, then swapping in a real harness — that would have saved a lot of pain.
 
----
+Treated skills as throwaway prompts at the start. They turned out to be the highest-leverage thing in the system. Versioning, tests, and CI all had to be retrofitted, and the retrofit was a mess. Should have been there from day one.
+
+No structured logging in the skill protocol. The cheapest debugging signal when a skill misbehaves is an event log of entries, exits, tool calls, and outputs. Adding that after the fact was a slog and is still incomplete.
 
 ## Why no source
 
-The codebase belongs to the team I built it for. This page is the public-facing version: the architectural patterns and the lessons, without the parts that are someone else's IP.
-
-If you'd like to talk about agent harness integration, skill authoring, or RAG-heavy product design, I'm on LinkedIn.
+The codebase belongs to the team I built it for. This is the public-facing version of the patterns and the lessons.
