@@ -1,6 +1,6 @@
 # Agentic AI platform
 
-Internal LLM agent product I shipped for a small team. The codebase is private; this is just notes on how it's put together and what I learned.
+Internal LLM agent prototype I shipped for a small team to explore usage of agentic skills. The codebase is private; this is just notes on how it's put together and what I learned.
 
 ## What it is
 
@@ -76,4 +76,6 @@ Committed to a harness too early. I spent weeks forcing it into product shapes i
 
 Could have just stuck to using a well developed agent harness ecosystem like Hermes Agent although its not too hard just importing their skills. However their learning loop is built differently so might be easier just building from their stack. 
 
-RAG not really needed, could have just followed obsidian vault way of getting LLM to strucuture docs uploaded and then tapping on hindsight for memory updates if needed to make persona more persistent. 
+RAG not really needed, could have just followed obsidian vault way of getting LLM to strucuture docs uploaded and then tapping on hindsight for memory updates if needed to make persona more persistent.
+
+When building skills, design your benchmarks first so you can get agent to mutate skill and end up with a polished skill.
