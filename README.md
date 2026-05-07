@@ -64,12 +64,8 @@ FastAPI on Python 3.11, supervisord in production. React 18 + TypeScript + Tailw
 
 ## What I'd do differently
 
-Committed to a vendor harness too early. I spent weeks forcing it into product shapes it wasn't designed for. Building the streaming and tool-call surface first against the thinnest possible in-house loop, getting the contracts stable, then swapping in a real harness — that would have saved a lot of pain.
+Committed to a harness too early. I spent weeks forcing it into product shapes it wasn't designed for. Building the streaming and tool-call surface first against the thinnest possible in-house loop, getting the contracts stable, then swapping in a real harness — that would have saved a lot of pain.
 
-Treated skills as throwaway prompts at the start. They turned out to be the highest-leverage thing in the system. Versioning, tests, and CI all had to be retrofitted, and the retrofit was a mess. Should have been there from day one.
+Could have just stuck to using a well developed agent harness ecosystem like Hermes Agent although its not too hard just importing their skills. However their learning loop is built differently so might be easier just building from their stack. 
 
-No structured logging in the skill protocol. The cheapest debugging signal when a skill misbehaves is an event log of entries, exits, tool calls, and outputs. Adding that after the fact was a slog and is still incomplete.
-
-## Why no source
-
-The codebase belongs to the team I built it for. This is the public-facing version of the patterns and the lessons.
+RAG not really needed, could have just followed obsidian vault way of getting LLM to strucuture docs uploaded and then tapping on hindsight for memory updates if needed to make persona more persistent. 
